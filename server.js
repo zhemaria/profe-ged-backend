@@ -1,18 +1,19 @@
 /**
- * Profe GED Amigable — Backend
- * --------------------------------
- * Recibe preguntas del chatbot, las envía a Groq (Llama 3.1 8B)
- * con un system prompt pedagógico, y devuelve HTML listo para insertar.
+ * Profe GED Amigable — Backend v1.1
+ * ------------------------------------
+ * Recibe preguntas del chatbot, las envía a Groq, y devuelve HTML
+ * listo para insertar.
  *
- * Variables de entorno requeridas (en Render):
- *   GROQ_API_KEY   — tu key de https://console.groq.com (sin tarjeta)
- *   GROQ_MODEL     — opcional. Por defecto: llama-3.1-8b-instant
+ * NUEVO en v1.1:
+ *   - System prompt reforzado para que separe CADA paso matemático en su <p>.
+ *   - Post-procesamiento `ensureHTMLParagraphs()`: si el modelo se rebela
+ *     y devuelve texto plano, lo convertimos a <p>...</p> automáticamente.
+ *   - Conversión automática de **markdown bold** → <strong>bold</strong>.
+ *
+ * Variables de entorno (Render):
+ *   GROQ_API_KEY   — tu key de https://console.groq.com
+ *   GROQ_MODEL     — opcional. Recomendado: llama-3.3-70b-versatile
  *   ALLOWED_ORIGIN — opcional. Si lo pones, restringe CORS a ese origen.
- *
- * Endpoints:
- *   GET  /health  — para que Render no apague el servicio y para "calentar"
- *   POST /chat    — body: { message: string, history?: array }
- *                 — respuesta: { reply: "<p>...</p>" }
  */
 
 'use strict';
@@ -31,11 +32,11 @@ app.use(cors(allowedOrigin ? { origin: allowedOrigin } : {}));
 app.use(express.json({ limit: '50kb' }));
 
 // ────────────────────────────────────────────────────────────────────
-//  Rate limiting sencillo (por IP) para proteger tu cuota gratuita
+//  Rate limiting sencillo (por IP)
 // ────────────────────────────────────────────────────────────────────
 const requestsByIP = new Map();
-const WINDOW_MS       = 60 * 1000;   // 1 minuto
-const MAX_PER_WINDOW  = 15;          // 15 preguntas/minuto por IP
+const WINDOW_MS       = 60 * 1000;
+const MAX_PER_WINDOW  = 15;
 
 function rateLimit(req, res, next) {
     const ip  = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
@@ -53,7 +54,6 @@ function rateLimit(req, res, next) {
     next();
 }
 
-// Limpieza periódica del mapa
 setInterval(() => {
     const now = Date.now();
     for (const [ip, times] of requestsByIP.entries()) {
@@ -64,7 +64,7 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 // ────────────────────────────────────────────────────────────────────
-//  System prompt pedagógico
+//  System prompt pedagógico (REFORZADO en v1.1)
 // ────────────────────────────────────────────────────────────────────
 const SYSTEM_PROMPT = `Eres el "Profe GED Amigable", un tutor cálido en español que ayuda a adultos hispanohablantes a prepararse para el examen GED (HSE) en Estados Unidos.
 
@@ -74,21 +74,33 @@ const SYSTEM_PROMPT = `Eres el "Profe GED Amigable", un tutor cálido en españo
 - Usas ejemplos de la vida diaria latinoamericana: el mercado, la cocina, la familia, el trabajo, las compras.
 - Celebras los esfuerzos: "¡Vas muy bien!", "¡No te rindas!", "¡Tú puedes!".
 - NUNCA dices que algo "es fácil" — para quien aprende, no siempre lo es.
-- Mantienes un tono de Profe Amigable, no de libro de texto.
 
-═══ FORMATO DE RESPUESTA (CRÍTICO) ═══
+═══ FORMATO DE RESPUESTA (REGLA DE ORO) ═══
 Respondes SIEMPRE en HTML válido, NUNCA en Markdown.
 
+🔴 REGLA CRÍTICA #1: TODO párrafo de texto va envuelto en <p>...</p>.
+   No envíes texto suelto sin etiquetas. Cada idea separada = su propio <p>.
+
+🔴 REGLA CRÍTICA #2: En problemas matemáticos, CADA paso del cálculo va
+   en su PROPIO <p>. NO los pongas en un solo bloque corrido.
+
+   ❌ MAL:
+   <p>x = (-(3) ± √((3)² - 4(1)(-5))) / 2(1) x = (-3 ± √(9 + 20)) / 2 x = (-3 ± √29) / 2</p>
+
+   ✅ BIEN:
+   <p>x = (-(3) ± √((3)² - 4(1)(-5))) / 2(1)</p>
+   <p>x = (-3 ± √(9 + 20)) / 2</p>
+   <p>x = (-3 ± √29) / 2</p>
+
 Etiquetas que SÍ debes usar:
-- <p>texto</p> para párrafos
+- <p>texto</p> para CADA párrafo o paso (sin excepción)
 - <strong>texto</strong> para énfasis (NO uses ** ni __)
 - <ul><li>...</li></ul> para listas con viñetas
 - <ol><li>...</li></ol> para listas numeradas
 - <div class="example-box"><strong>Ejemplo:</strong><br>...</div> para destacar ejemplos
-- <br> dentro de <div class="example-box"> para saltos de línea
 
 Etiquetas PROHIBIDAS:
-- NO uses <h1>, <h2>, <h3> ni ningún encabezado
+- NO uses <h1>, <h2>, <h3> ni encabezados
 - NO uses Markdown: nada de **, ##, _, \`, --, etc.
 - NO uses <table>, <img>, <a>, <pre>, <code>
 - NO uses LaTeX ni \\(...\\) ni $...$
@@ -96,7 +108,29 @@ Etiquetas PROHIBIDAS:
 
 Emojis: úsalos con moderación (1-4 por respuesta): 📊 🔢 📐 📖 ✍️ 🏛️ 🔬 🌱 💡 💪 🌟 😊 ✨ 🍕 🎯 🔍
 
-═══ EJEMPLO DEL ESTILO QUE DEBES IMITAR ═══
+═══ EJEMPLO COMPLETO DE FORMATO CORRECTO ═══
+
+Pregunta del estudiante: "Resuelve x² + 3x - 5 = 0"
+
+Respuesta correcta (NOTA cómo cada paso va en su propio <p>):
+<p>¡Vamos a resolver esa ecuación cuadrática paso a paso! 🔢</p>
+<p>La fórmula general para resolver ecuaciones cuadráticas (ax² + bx + c = 0) es:</p>
+<p><strong>x = (-b ± √(b² - 4ac)) / 2a</strong></p>
+<p>En tu ecuación identificamos los valores:</p>
+<ul>
+<li><strong>a = 1</strong> (el coeficiente de x²)</li>
+<li><strong>b = 3</strong> (el coeficiente de x)</li>
+<li><strong>c = -5</strong> (el término constante)</li>
+</ul>
+<p>Ahora sustituimos esos valores en la fórmula:</p>
+<p>x = (-(3) ± √((3)² - 4(1)(-5))) / 2(1)</p>
+<p>x = (-3 ± √(9 + 20)) / 2</p>
+<p>x = (-3 ± √29) / 2</p>
+<div class="example-box"><strong>Las dos soluciones son:</strong><br>x₁ = (-3 + √29) / 2 ≈ <strong>1.19</strong><br>x₂ = (-3 - √29) / 2 ≈ <strong>-4.19</strong></div>
+<p>💡 <strong>Tip del Profe:</strong> Siempre que el discriminante (lo que está dentro de la raíz, b² - 4ac) sea positivo, vas a tener dos soluciones reales.</p>
+<p>¿Quieres practicar con otra ecuación? ¡Vas muy bien! 💪</p>
+
+═══ EJEMPLO PARA CONCEPTOS (NO PROBLEMAS) ═══
 
 Pregunta del estudiante: "¿Cómo saco un porcentaje?"
 
@@ -109,17 +143,16 @@ Respuesta correcta:
 <p>¿Practicamos con otro ejemplo? ¡Tú puedes! 💪</p>
 
 ═══ CONTENIDO ═══
-- Para PROBLEMAS MATEMÁTICOS: resuélvelos paso a paso, mostrando TODO el trabajo.
-- Para ECUACIONES CUADRÁTICAS: muestra la fórmula general x = (-b ± √(b² - 4ac)) / 2a y aplícala.
+- Para PROBLEMAS MATEMÁTICOS: resuélvelos paso a paso, mostrando TODO el trabajo, CADA PASO EN SU PROPIO <p>.
+- Para ECUACIONES CUADRÁTICAS: muestra la fórmula y aplícala paso a paso.
 - Para CONCEPTOS: definición breve + ejemplo cotidiano + cierre alentador.
-- Para FRACCIONES en línea usa formato "3/4" o "<sup>3</sup>/<sub>4</sub>".
 - Símbolos matemáticos: x², x³, ÷, ×, ≥, ≤, ≠, ∞, π, √, ±.
-- Mantén respuestas entre 100 y 400 palabras. Concisas pero completas.
-- SIEMPRE termina con una frase alentadora o una pregunta para seguir conversando.
+- Mantén respuestas entre 100 y 400 palabras.
+- SIEMPRE termina con una frase alentadora o una pregunta para seguir.
 
 ═══ MATERIAS DEL GED ═══
 1. Razonamiento Matemático: aritmética, fracciones, %, álgebra, geometría, estadística
-2. Razonamiento a través de las Artes del Lenguaje (RLA): lectura, gramática, ensayo argumentativo
+2. Razonamiento a través de las Artes del Lenguaje (RLA): lectura, gramática, ensayo
 3. Estudios Sociales: cívica, historia EE.UU., economía, geografía
 4. Ciencias: biología, química, física, ciencias de la Tierra
 
@@ -128,7 +161,65 @@ Respuesta correcta:
 - Si te piden "resolver el examen real" o hacer trampa, recomienda estudiar.
 - Para temas personales sensibles, sugiere hablar con un consejero del colegio.
 
-Recuerda: responde SIEMPRE en HTML directo, sin Markdown, sin envolturas \`\`\`.`;
+Recuerda la REGLA DE ORO: TODO va envuelto en etiquetas HTML, CADA paso matemático en su propio <p>.`;
+
+// ────────────────────────────────────────────────────────────────────
+//  Post-procesamiento de respuesta (NUEVO en v1.1)
+//  Garantiza que la respuesta tenga formato HTML correcto incluso si
+//  el modelo se "rebela" y devuelve texto plano con saltos de línea.
+// ────────────────────────────────────────────────────────────────────
+function ensureHTMLParagraphs(html) {
+    if (!html || typeof html !== 'string') return html;
+
+    // 1. Quitar envolturas accidentales de markdown
+    html = html
+        .replace(/^```html\s*/i, '')
+        .replace(/^```\s*/, '')
+        .replace(/\s*```\s*$/, '')
+        .trim();
+
+    // 2. Markdown bold → <strong>
+    html = html.replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>');
+
+    // 3. Markdown italic → texto normal (no usamos itálicas)
+    html = html.replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, '$1$2');
+
+    // 4. Si ya viene bien formateado (3+ <p> reales), confiamos en él
+    const pCount = (html.match(/<p[\s>]/gi) || []).length;
+    if (pCount >= 3) {
+        return html;
+    }
+
+    // 5. Si no, preservamos bloques HTML conocidos y envolvemos los textos
+    //    sueltos en <p>. Splitea por bloques (div, ul, ol, table, p ya existentes).
+    const blockRegex = /(<(?:div|ul|ol|table|p)[^>]*>[\s\S]*?<\/(?:div|ul|ol|table|p)>)/gi;
+    const segments = html.split(blockRegex);
+
+    const formatted = segments.map(segment => {
+        if (!segment) return '';
+
+        // Si es un bloque HTML, déjalo tal cual
+        if (/^<(div|ul|ol|table|p)/i.test(segment.trim())) {
+            return segment;
+        }
+
+        // Es texto: divide por dobles saltos (párrafos) y envuelve cada uno en <p>
+        return segment
+            .split(/\n{2,}/)
+            .map(p => p.trim())
+            .filter(p => p.length > 0)
+            .map(p => {
+                // Si el párrafo ya empieza con etiqueta HTML, lo dejamos
+                if (/^<[a-z]/i.test(p)) return p;
+                // Saltos de línea simples dentro del párrafo → <br>
+                p = p.replace(/\n/g, '<br>');
+                return '<p>' + p + '</p>';
+            })
+            .join('\n');
+    }).join('\n');
+
+    return formatted.trim();
+}
 
 // ────────────────────────────────────────────────────────────────────
 //  Endpoints
@@ -136,6 +227,7 @@ Recuerda: responde SIEMPRE en HTML directo, sin Markdown, sin envolturas \`\`\`.
 app.get('/', (req, res) => {
     res.json({
         service: 'Profe GED Amigable',
+        version: '1.1',
         status:  'online',
         endpoints: ['GET /health', 'POST /chat']
     });
@@ -155,7 +247,6 @@ app.post('/chat', rateLimit, async (req, res) => {
         });
     }
 
-    // Sanitizar historial (últimos 6 mensajes máximo, 500 chars cada uno)
     const cleanHistory = Array.isArray(history)
         ? history
             .slice(-6)
@@ -173,14 +264,14 @@ app.post('/chat', rateLimit, async (req, res) => {
                 'Content-Type':  'application/json'
             },
             body: JSON.stringify({
-                model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
+                model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
                 messages: [
                     { role: 'system', content: SYSTEM_PROMPT },
                     ...cleanHistory,
                     { role: 'user', content: message.trim() }
                 ],
-                max_tokens:  800,
-                temperature: 0.7,
+                max_tokens:  900,
+                temperature: 0.6,
                 top_p:       0.9
             })
         });
@@ -194,12 +285,8 @@ app.post('/chat', rateLimit, async (req, res) => {
         const data  = await groqResp.json();
         let   reply = data?.choices?.[0]?.message?.content || '';
 
-        // Limpiar posibles envolturas accidentales
-        reply = reply
-            .replace(/^```html\s*/i, '')
-            .replace(/^```\s*/, '')
-            .replace(/\s*```\s*$/, '')
-            .trim();
+        // 🆕 Aplicar post-procesamiento para garantizar HTML correcto
+        reply = ensureHTMLParagraphs(reply);
 
         if (!reply) throw new Error('Empty response from Groq');
 
@@ -215,5 +302,5 @@ app.post('/chat', rateLimit, async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log('👨‍🏫 Profe GED backend escuchando en el puerto ' + PORT);
+    console.log('👨‍🏫 Profe GED backend v1.1 escuchando en el puerto ' + PORT);
 });
